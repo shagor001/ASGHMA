@@ -16,10 +16,15 @@ namespace HavenSoft.HexManiac.Agent {
       };
 
       private static async Task<int> Main(string[] args) {
+         if (args.Length == 4 && string.Equals(args[0], "call", StringComparison.OrdinalIgnoreCase)) {
+         Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+         return await Call(args[1], Path.GetFullPath(args[2]), args[3]);
+      }
          if (args.Length < 2 || (string.Equals(args[0], "inspect", StringComparison.OrdinalIgnoreCase) && args.Length != 3) ||
              (string.Equals(args[0], "list-maps", StringComparison.OrdinalIgnoreCase) && args.Length != 2)) {
             Console.Error.WriteLine("Usage: agent inspect <rom> <map>");
             Console.Error.WriteLine("       agent list-maps <rom>");
+            Console.Error.WriteLine("       agent call <tool> <rom> <json args>");
             return 2;
          }
 
@@ -45,6 +50,32 @@ namespace HavenSoft.HexManiac.Agent {
             Console.Error.WriteLine($"{ex.GetType().Name}: {ex.Message}");
             return 1;
          }
+      }
+
+      private static async Task<int> Call(string tool, string romPath, string json) {
+            try {
+               using var document = JsonDocument.Parse(json);
+               var root = document.RootElement;
+               var map = root.TryGetProperty("map", out var mapValue) ? mapValue.GetString() : null;
+               switch (tool.ToLowerInvariant()) {
+                  case "get_map": return WriteResponse(await AgentApi.GetMap(romPath, map));
+                  case "list_events": return WriteResponse(await AgentApi.ListEvents(romPath, map, root.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : "all"));
+                  case "find_free_flag": return WriteResponse(await AgentApi.FindFreeFlag(romPath));
+                  case "find_free_var": return WriteResponse(await AgentApi.FindFreeVar(romPath));
+                  default:
+                     Console.WriteLine(JsonSerializer.Serialize(AgentApi.ToolResponse<object>.Failure("unknown_tool", $"Unknown tool: {tool}"), JsonOptions));
+                     return 1;
+               }
+            } catch (Exception ex) {
+               var response = AgentApi.ToolResponse<object>.Failure("invalid_request", ex.Message);
+               Console.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
+               return 1;
+            }
+         }
+
+      private static int WriteResponse<T>(AgentApi.ToolResponse<T> response) {
+         Console.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
+         return response.Ok ? 0 : 1;
       }
 
       private static async Task<InspectionResult> Inspect(string romPath, string map) {

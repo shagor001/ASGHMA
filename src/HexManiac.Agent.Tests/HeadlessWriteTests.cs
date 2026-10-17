@@ -12,7 +12,7 @@ namespace HavenSoft.HexManiac.Agent.Tests {
    public class HeadlessWriteTests {
       private static readonly string RomPath = Path.GetFullPath(Path.Combine(
          AppContext.BaseDirectory,
-         "..", "..", "..", "..", "..", "..", "..",
+         "..", "..", "..", "..", "..",
          "artifacts",
          "HexManiac.Integration",
          "bin",

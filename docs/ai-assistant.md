@@ -6,16 +6,10 @@ The spike is implemented in `src/HexManiac.Agent` and
 `src/HexManiac.Agent.Tests`. Both target `net6.0`, reference `HexManiac.Core`
 directly, and do not reference the WPF project.
 
-Commands:
+The required validation command is:
 
 ```powershell
-dotnet build src\HexManiac.Integration\HexManiac.Integration.csproj
-dotnet build src\HexManiac.Agent\HexManiac.Agent.csproj
-dotnet run --project src\HexManiac.Agent -- inspect "C:\Users\iamsh\ROMs\Pokemon Fire Red (U).gba" "maps.bank3.Pallet Town.3-0"
-dotnet run --project src\HexManiac.Agent -- list-maps "C:\Users\iamsh\ROMs\Pokemon Emerald Version (U).gba"
-dotnet run --project src\HexManiac.Agent -- inspect "C:\Users\iamsh\ROMs\Pokemon Emerald Version (U).gba" "maps.bank0.PETALBURG CITY.0-0"
-dotnet test src\HexManiac.Agent.Tests\HexManiac.Agent.Tests.csproj --no-build --logger "console;verbosity=normal"
-dotnet test src\HexManiac.Integration\HexManiac.Integration.csproj --logger "console;verbosity=minimal"
+dotnet build HexManiacAdvance.sln -c Debug
 ```
 
 `inspect` loads the ROM with `HardcodeTablesModel`, creates a `ViewPort`
@@ -44,16 +38,17 @@ is the exact format accepted by `inspect`.
   loaded FireRed, navigated to Pallet Town, created an object event, applied
   `EventTemplate.CreateNPC`, observed the object count increase by one, then
   undid the change and verified every ROM byte matched the original.
-- The standalone Agent and Agent.Tests projects both built successfully.
-- After correcting the fixture path, the headless write test passed with
-  `Passed: 1, Skipped: 0, Failed: 0`.
-- The Integration project build/test did not reach test execution because the
-  existing `HexManiac.Tests` project fails compilation. The observed failure
-  was 1,816 compile errors, primarily missing `HavenSoft.HexManiac.Core`
-  namespace/type references, plus two `CS0535` comparer errors. Therefore the
-  Integration counts are Passed: 0, Skipped: 0, Failed: 0 executed tests;
-  the run is **blocked at compilation**, not a test failure. No existing HMA
-  source files were changed to work around it.
+- `dotnet build HexManiacAdvance.sln -c Debug` passed after the Phase 1 slice
+  fixes. It produced two nullable-analysis warnings in the test project and
+  zero errors.
+- The solution-level Agent test command passed:
+
+  ```powershell
+  dotnet test HexManiacAdvance.sln -c Debug --no-build --filter FullyQualifiedName~HexManiac.Agent.Tests --logger "console;verbosity=minimal"
+  ```
+
+  Result: Passed 5, Skipped 0, Failed 0. The other solution test assemblies
+  were selected by the solution runner but had no matching tests.
 
 ### Phase 0 findings
 
@@ -80,7 +75,7 @@ is the exact format accepted by `inspect`.
   comparison against a CUBE ROM remains unverified** because no CUBE ROM was
   supplied.
 
-## Follow-up status
+## Phase 1, slice 1
 
 The supplied files are vanilla ROMs:
 
@@ -101,43 +96,40 @@ lines are passed to `StoredMetadata`; otherwise an empty metadata set is used.
 No adjacent `.toml` was present for the supplied vanilla ROMs, so this
 positive metadata-file path is **not runtime-verified**.
 
-The exact required solution command was run:
+The new read-only methods are `get_map`, `list_events`, `find_free_flag`, and
+`find_free_var`. They return schema-versioned response objects:
+`SchemaVersion`, `Ok`, `Result`, and structured `Error`; tool failures are
+returned as JSON rather than thrown to callers. `list_events` accepts
+`all`, `object`, `warp`, `script`, or `signpost` and reuses the inspect event
+decoding.
+
+The built executable is invoked without `dotnet run`:
 
 ```powershell
-dotnet build HexManiacAdvance.sln -c Debug
+dotnet artifacts\HexManiac.Agent\bin\Debug\net6.0\HexManiac.Agent.dll call get_map `
+  "...\Pokemon FireRed.gba" `
+  '{"map":"maps.bank3.Pallet Town.3-0"}'
+dotnet artifacts\HexManiac.Agent\bin\Debug\net6.0\HexManiac.Agent.dll call list_events `
+  "...\Pokemon FireRed.gba" `
+  '{"map":"maps.bank3.Pallet Town.3-0","type":"all"}'
+dotnet artifacts\HexManiac.Agent\bin\Debug\net6.0\HexManiac.Agent.dll call find_free_flag `
+  "...\Pokemon FireRed.gba" '{}'
+dotnet artifacts\HexManiac.Agent\bin\Debug\net6.0\HexManiac.Agent.dll call find_free_var `
+  "...\Pokemon Emerald.gba" '{}'
 ```
 
-It remains **FAILED** on this branch. `master` was built with the same command
-in a clean detached worktree and **PASSED**. The new Agent projects now build
-without copying Core `.cs` sources, but the solution-level build reaches the
-existing `HexManiac.Integration`/`HexManiac.Tests` reference and fails with
-missing `HavenSoft.HexManiac.Tests` or Core test symbols depending on solution
-build ordering. This is a build-system/project-reference issue, not a ROM
-runtime failure. Existing HMA projects were not edited.
+These commands ran successfully. `get_map` returned map id 3000, width 24,
+height 20, layout id 78, and event counts 3/3/3/5. `list_events` returned 14
+typed events. `find_free_flag` returned 33 and `find_free_var` returned 16462.
+The output schema was deterministic and version 1.
 
-The required Integration command:
+The tests verify FireRed and Emerald map counts, typed FireRed events, and that
+the selected free flag is absent from script usages and every map's object
+events. ROM-dependent tests skip when the fixture is absent. The existing
+headless write/undo test remains included and passed.
 
-```powershell
-dotnet test src\HexManiac.Integration\HexManiac.Integration.csproj
-```
-
-is **FAILED before test discovery** because `HexManiac.Tests` does not compile.
-Counts are Passed: 0, Skipped: 0, Failed: 0 executed tests; compilation
-reported hundreds of errors, so no test cases ran.
-
-The updated FireRed inspection command was run successfully and verified the
-new output:
-
-```powershell
-dotnet run --project src\HexManiac.Agent -- inspect `
-  "C:\Users\iamsh\ROMs\Pokemon Fire Red (U).gba" `
-  "maps.bank3.Pallet Town.3-0"
-```
-
-The output contained three objects, three warps, three scripts, and five
-signposts. The object with no script emitted `"scriptAddress": null`, and all
-signposts emitted typed fields.
-
-Phase 1 read-only JSON methods (`get_map`, `list_events`,
-`decompile_script`, `list_constants`, `search_script_commands`,
-`find_free_flag`, and `find_free_var`) are **NOT RUN** and were not added.
+`decompile_script`, `list_constants`, and `search_script_commands` are not
+implemented in this phase. CUBE runtime comparison remains not run because no
+CUBE ROM was supplied. Adjacent-ROM TOML loading is implemented, but the
+positive path remains unverified because the supplied vanilla ROMs have no
+adjacent TOML file.
