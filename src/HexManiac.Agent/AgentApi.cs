@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 
 namespace HavenSoft.HexManiac.Agent {
@@ -47,22 +48,140 @@ namespace HavenSoft.HexManiac.Agent {
          });
       }
 
-      public static async Task<ToolResponse<FreeValueResult>> FindFreeFlag(string romPath) {
+      public static async Task<ToolResponse<FreeValueResult>> FindFreeFlag(string romPath, string range = "persistent") {
          return await Execute(romPath, null, (viewPort, _) => {
             var parser = viewPort.Tools.CodeTool.ScriptParser;
             var usage = Flags.GetScriptUsage(viewPort.Model, parser);
             var used = new HashSet<int>(usage.ItemFlags);
-            used.UnionWith(usage.TrainerFlags);
-            return new FreeValueResult(Flags.NextFreeFlag(viewPort.Model, used));
+            used.UnionWith(Flags.GetReservedFlags(viewPort.Model));
+            var selected = FindFlagInRange(viewPort.Model, used, range);
+            if (selected.Value < 0) throw new ArgumentException($"No free flag exists in range '{range}'.");
+            return selected;
          });
       }
 
-      public static async Task<ToolResponse<FreeValueResult>> FindFreeVar(string romPath) {
+      public static async Task<ToolResponse<FreeValueResult>> FindFreeVar(string romPath, string range = "persistent") {
          return await Execute(romPath, null, (viewPort, _) => {
             var usage = Flags.GetScriptUsage(viewPort.Model, viewPort.Tools.CodeTool.ScriptParser);
-            return new FreeValueResult(Flags.NextFreeVariable(viewPort.Model, usage.Variables));
+            var used = new HashSet<int>(usage.Variables);
+            used.UnionWith(Flags.GetReservedVariables(viewPort.Model));
+            var selected = FindVariableInRange(viewPort.Model, used, range);
+            if (selected.Value < 0) throw new ArgumentException($"No free variable exists in range '{range}'.");
+            return selected;
          });
       }
+
+      public static async Task<ToolResponse<ScriptResult>> DecompileScript(string romPath, int address) {
+         return await Execute(romPath, null, (viewPort, _) => {
+            var run = viewPort.Model.GetNextRun(address);
+            if (run is not XSERun xse || xse.Start != address) throw new ArgumentException($"Address {address} is not the start of a script.");
+            var parser = viewPort.Tools.CodeTool.ScriptParser;
+            var length = parser.GetScriptSegmentLength(viewPort.Model, address);
+            if (length <= 0) throw new ArgumentException($"Address {address} is not a decodable script.");
+            var sections = 0;
+            return new ScriptResult(address, parser.Parse(viewPort.Model, address, length, ref sections));
+         });
+      }
+
+      public static async Task<ToolResponse<ConstantResult>> ListConstants(string romPath, string kind) {
+         return await Execute(romPath, null, (viewPort, _) => {
+            var normalized = (kind ?? string.Empty).Trim().ToLowerInvariant();
+            var (listName, label) = normalized switch {
+               "items" => (HardcodeTablesModel.ItemsTableName, "items"),
+               "species" => (HardcodeTablesModel.GetSpeciesNameTable(viewPort.Model), "species"),
+               "sprites" or "object_graphics" or "object-graphics" => (HardcodeTablesModel.OverworldSprites, "sprites"),
+               "movement" or "movement_types" or "movement-types" => ("movementtypes", "movement_types"),
+               "flags" => (Flags.FlagListName, "flags"),
+               "vars" or "variables" => (Flags.VariableListName, "vars"),
+               _ => throw new ArgumentException($"Unknown constant kind: {kind}.")
+            };
+            var options = viewPort.Model.GetOptions(listName) ?? Array.Empty<string>();
+            var values = options.Select((name, value) => new ConstantEntry(
+               value,
+               string.IsNullOrWhiteSpace(name) || name == value.ToString() ? null : name,
+               string.IsNullOrWhiteSpace(name) || name == value.ToString() ? "rom-value" : "reference-file-or-metadata"
+            )).ToList();
+            return new ConstantResult(label, listName, values);
+         });
+      }
+
+      public static async Task<ToolResponse<IReadOnlyList<CommandResult>>> SearchScriptCommands(string romPath, string query) {
+         return await Execute(romPath, null, (viewPort, _) => {
+            if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("Query cannot be empty.");
+            var field = typeof(ScriptParser).GetField("engine", BindingFlags.Instance | BindingFlags.NonPublic);
+            var engine = field?.GetValue(viewPort.Tools.CodeTool.ScriptParser) as IEnumerable<IScriptLine>;
+            if (engine == null) throw new InvalidOperationException("Script command reference is unavailable.");
+            var hash = viewPort.Model.GetShortGameCode();
+            var results = engine
+               .OfType<ScriptLine>()
+               .Where(line => line.MatchesGame(hash) && line.LineCommand.Contains(query, StringComparison.OrdinalIgnoreCase))
+               .GroupBy(line => line.LineCommand, StringComparer.OrdinalIgnoreCase)
+               .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+               .Select(group => {
+                  var line = group.First();
+                  return new CommandResult(line.LineCommand, line.Args.OfType<ScriptArg>().Select(arg =>
+                     new CommandArgument(arg.Name, arg.Type.ToString(), arg.EnumTableName)).ToList());
+               }).ToList();
+            var referencePath = Path.Combine(AppContext.BaseDirectory, "resources", "scriptReference.txt");
+            if (File.Exists(referencePath)) {
+               foreach (var line in File.ReadLines(referencePath)) {
+                  var text = line.TrimStart(' ', '\t', '#');
+                  var tokens = text.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                  if (tokens.Length < 2 || !tokens[0].Equals("XX", StringComparison.OrdinalIgnoreCase) ||
+                      !tokens[1].Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+                  if (results.Any(item => item.Name.Equals(tokens[1], StringComparison.OrdinalIgnoreCase))) continue;
+                  var definition = text.Substring(text.IndexOf(tokens[1], StringComparison.Ordinal) + tokens[1].Length);
+                  var comment = definition.IndexOf('#');
+                  if (comment >= 0) definition = definition.Substring(0, comment);
+                  var arguments = definition.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries).Select(token => {
+                     var name = token.TrimEnd('.', ':', ',');
+                     return new CommandArgument(name, "Reference", null);
+                  }).ToList();
+                  results.Add(new CommandResult(tokens[1], arguments));
+               }
+            }
+            return (IReadOnlyList<CommandResult>)results.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
+         });
+      }
+
+      private static FreeValueResult FindFlagInRange(IDataModel model, ISet<int> used, string range) {
+         var (start, end, name) = FlagRange(model, range);
+         var excluded = new HashSet<int>(used);
+         for (var value = 0; value < 0x10000; value++) if (value < start || value > end) excluded.Add(value);
+         var candidate = Flags.NextFreeFlag(model, excluded);
+         return candidate >= start && candidate <= end ? new FreeValueResult(candidate, name, start, end) : new FreeValueResult(-1, name, start, end);
+      }
+
+      private static FreeValueResult FindVariableInRange(IDataModel model, ISet<int> used, string range) {
+         var (start, end, name) = VariableRange(range);
+         var excluded = new HashSet<int>(used);
+         for (var value = 0; value < 0x8000; value++) if (value < start || value > end) excluded.Add(value);
+         var candidate = Flags.NextFreeVariable(model, excluded);
+         return candidate >= start && candidate <= end ? new FreeValueResult(candidate, name, start, end) : new FreeValueResult(-1, name, start, end);
+      }
+
+      private static (int Start, int End, string Name) FlagRange(IDataModel model, string range) {
+         var normalized = (range ?? "persistent").Trim().ToLowerInvariant();
+         return normalized switch {
+            "persistent" or "story" => (0x21, model.IsEmerald() ? 0x4FF : 0x4FF, "persistent-story"),
+            "temporary" or "temp" => (0x00, 0x20, "temporary"),
+            "trainer" => (0x500, 0x7FF, "trainer"),
+            "system" => (0x800, 0xFFFF, "system"),
+            "all" => (0x00, 0xFFFF, "all"),
+            _ => throw new ArgumentException($"Unknown flag range: {range}.")
+         };
+      }
+
+      private static (int Start, int End, string Name) VariableRange(string range) {
+         var normalized = (range ?? "persistent").Trim().ToLowerInvariant();
+         return normalized switch {
+            "persistent" or "story" => (0x4034, 0x40FF, "persistent"),
+            "all" => (0x4034, 0x7FFF, "all"),
+            _ => throw new ArgumentException($"Unknown variable range: {range}.")
+         };
+      }
+
+      private static bool IsDailyName(string name) => name?.Contains("DAILY", StringComparison.OrdinalIgnoreCase) == true;
 
       private static async Task<ToolResponse<T>> Execute<T>(string romPath, string mapName, Func<ViewPort, BlockMapViewModel, T> action) {
          try {
@@ -127,7 +246,7 @@ namespace HavenSoft.HexManiac.Agent {
          return result;
       }
 
-      private static object NullablePointer(int value) => value == Pointer.NULL ? null : value;
+      private static object NullablePointer(int value) => value == HavenSoft.HexManiac.Core.ViewModels.DataFormats.Pointer.NULL ? null : value;
 
       public sealed record ToolResponse<T>(int SchemaVersion, bool Ok, T Result, ToolError Error) {
          public static ToolResponse<T> Success(T result) => new(AgentApi.SchemaVersion, true, result, null);
@@ -136,6 +255,11 @@ namespace HavenSoft.HexManiac.Agent {
       public sealed record ToolError(string Code, string Message);
       public sealed record MapResult(int MapId, int Width, int Height, int LayoutId, EventCounts EventCounts);
       public sealed record EventCounts(int Objects, int Warps, int Scripts, int Signposts);
-      public sealed record FreeValueResult(int Value);
+      public sealed record FreeValueResult(int Value, string Range = null, int RangeStart = -1, int RangeEnd = -1);
+      public sealed record ScriptResult(int Address, string Text);
+      public sealed record ConstantResult(string Kind, string ListName, IReadOnlyList<ConstantEntry> Values);
+      public sealed record ConstantEntry(int Value, string Name, string NameSource);
+      public sealed record CommandResult(string Name, IReadOnlyList<CommandArgument> Arguments);
+      public sealed record CommandArgument(string Name, string Type, string EnumTable);
    }
 }

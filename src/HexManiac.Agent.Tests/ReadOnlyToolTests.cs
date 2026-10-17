@@ -57,11 +57,17 @@ namespace HavenSoft.HexManiac.Agent.Tests {
          var response = await AgentApi.FindFreeFlag(romPath);
          Assert.True(response.Ok);
          var flag = response.Result.Value;
+         Assert.Equal(33, flag);
+         Assert.Equal("persistent-story", response.Result.Range);
+         Assert.Equal(0x21, response.Result.RangeStart);
          var singletons = new Singletons();
          var model = new HardcodeTablesModel(singletons, await File.ReadAllBytesAsync(romPath), new StoredMetadata(Array.Empty<string>()));
          Directory.SetCurrentDirectory(AppContext.BaseDirectory);
          var viewPort = new ViewPort(romPath, model, InstantDispatch.Instance, singletons, new MapTutorialsViewModel(), new StubFileSystem());
          await viewPort.InitializationWorkload;
+         var usage = Flags.GetScriptUsage(model, viewPort.Tools.CodeTool.ScriptParser);
+         Assert.DoesNotContain(flag, usage.ItemFlags);
+         Assert.DoesNotContain(flag, usage.TrainerFlags);
          Assert.Empty(Flags.FindFlagUsages(model, viewPort.Tools.CodeTool.ScriptParser, flag));
          var banks = model.GetTableModel(HardcodeTablesModel.MapBankTable);
          Assert.NotNull(banks);
@@ -75,7 +81,60 @@ namespace HavenSoft.HexManiac.Agent.Tests {
                Assert.NotNull(events);
                Assert.DoesNotContain(events.Objects, e => e.Flag == flag);
             }
+
          }
+      }
+
+      [SkippableFact]
+      public async Task FindFreeVar_ReportsPersistentRange() {
+         Skip.IfNot(File.Exists(Rom("Pokemon FireRed.gba")));
+         var response = await AgentApi.FindFreeVar(Rom("Pokemon FireRed.gba"));
+         Assert.True(response.Ok);
+         Assert.Equal("persistent", response.Result.Range);
+         Assert.InRange(response.Result.Value, response.Result.RangeStart, response.Result.RangeEnd);
+      }
+
+      [SkippableFact]
+      public async Task DecompileScript_MatchesKnownFireRedAndEmeraldScripts() {
+         Skip.IfNot(File.Exists(Rom("Pokemon FireRed.gba")));
+         Skip.IfNot(File.Exists(Rom("Pokemon Emerald.gba")));
+         var fireRed = await AgentApi.DecompileScript(Rom("Pokemon FireRed.gba"), 1464156);
+         var emerald = await AgentApi.DecompileScript(Rom("Pokemon Emerald.gba"), 1950717);
+         Assert.True(fireRed.Ok);
+         Assert.Contains("msgbox.default", fireRed.Result.Text);
+         Assert.Contains("setflag 0x0002", fireRed.Result.Text);
+         Assert.True(emerald.Ok);
+         Assert.Contains("msgbox.npc", emerald.Result.Text);
+         Assert.Contains("end", emerald.Result.Text);
+      }
+
+      [SkippableFact]
+      public async Task DecompileScript_RejectsNonScriptAddress() {
+         Skip.IfNot(File.Exists(Rom("Pokemon FireRed.gba")));
+         var response = await AgentApi.DecompileScript(Rom("Pokemon FireRed.gba"), 0);
+         Assert.False(response.Ok);
+         Assert.Equal("invalid_argument", response.Error.Code);
+      }
+
+      [SkippableFact]
+      public async Task ListConstants_ReturnsNamedValues() {
+         Skip.IfNot(File.Exists(Rom("Pokemon FireRed.gba")));
+         var response = await AgentApi.ListConstants(Rom("Pokemon FireRed.gba"), "movement_types");
+         Assert.True(response.Ok);
+         Assert.Contains(response.Result.Values, item => item.Value == 0 && item.Name == "face_down");
+         Assert.All(response.Result.Values, item => Assert.NotNull(item.NameSource));
+      }
+
+      [SkippableFact]
+      public async Task SearchScriptCommands_ReturnsReferenceAndParserCommands() {
+         Skip.IfNot(File.Exists(Rom("Pokemon FireRed.gba")));
+         var giveItem = await AgentApi.SearchScriptCommands(Rom("Pokemon FireRed.gba"), "giveitem");
+         var movement = await AgentApi.SearchScriptCommands(Rom("Pokemon FireRed.gba"), "applymovement");
+         Assert.True(giveItem.Ok);
+         Assert.Contains(giveItem.Result, command => command.Name == "giveitem");
+         Assert.True(movement.Ok);
+         Assert.Contains(movement.Result, command => command.Name == "applymovement");
+         Assert.NotEmpty(movement.Result.Single(command => command.Name == "applymovement").Arguments);
       }
    }
 }

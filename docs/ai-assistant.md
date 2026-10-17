@@ -128,8 +128,80 @@ the selected free flag is absent from script usages and every map's object
 events. ROM-dependent tests skip when the fixture is absent. The existing
 headless write/undo test remains included and passed.
 
-`decompile_script`, `list_constants`, and `search_script_commands` are not
-implemented in this phase. CUBE runtime comparison remains not run because no
-CUBE ROM was supplied. Adjacent-ROM TOML loading is implemented, but the
-positive path remains unverified because the supplied vanilla ROMs have no
-adjacent TOML file.
+## Phase 1, slice 2
+
+The slice 2 tools are implemented with the same version 1 response envelope,
+deterministic ordering, and structured error objects:
+
+- `decompile_script` accepts a script start address and returns the
+  decompiled text. It verifies the address is an `XSERun` script start;
+  invalid addresses return `invalid_argument` rather than throwing.
+- `list_constants` supports `items`, `species`, `sprites`/
+  `object_graphics`, `movement_types`, `flags`, and `vars`/
+  `variables`. Each value contains a numeric value, optional name, and
+  `NameSource`. HMA combines ROM metadata and reference lists while building
+  these options, so the per-entry source label is an implementation-level
+  provenance classification, not a byte-level proof.
+- `search_script_commands` searches parser commands case-insensitively and
+  also reads documented multicommands from `resources\scriptReference.txt`.
+  This fallback is needed for commands such as `giveitem`, which are
+  documented there but are not active parser command lines.
+
+The CLI form for every tool is:
+
+```powershell
+dotnet artifacts\HexManiac.Agent\bin\Debug\net6.0\HexManiac.Agent.dll call <tool> <rom> '<json args>'
+```
+
+Verified real outputs included:
+
+- FireRed `decompile_script` address `1464156` returned a multi-section script
+  beginning `section0: # 16575C`, with `msgbox.default`, movement data,
+  comparisons, and `setflag 0x0002`.
+- Emerald `decompile_script` address `1950717` returned the Petalburg object
+  script beginning `section0: # 1DC3FD`, including the WALLY text and `end`.
+- `search_script_commands` for `applymovement` returned `applymovement` with
+  `npc: Short, data: Pointer` and `applymovement2` with the additional
+  `bank: Byte, map: Byte` arguments.
+- `search_script_commands` for `giveitem` returned `giveitem`, `giveitem2`,
+  and `giveitem3` from the reference-file multicommand definitions.
+
+Free-value allocation uses HMA's `Flags.NextFreeFlag` and
+`Flags.NextFreeVariable` procedures over explicit ranges. The default flag
+range is `persistent-story` (`0x21`-`0x4FF`, decimal 33-1279); temporary
+flags (`0x00`-`0x20`), trainer flags (`0x500`-`0x7FF`), system flags
+(`0x800`-`0xFFFF`), and `all` are selectable with the optional `range`
+argument. The default variable range is `persistent`
+(`0x4034`-`0x40FF`, decimal 16436-16639); `all` selects
+`0x4034`-`0x7FFF`.
+
+On the FireRed fixture, the historical un-ranged slice-1 call returned flag
+33 (`0x21`) and variable 16462 (`0x404E`). Those values came from
+`Flags.GetScriptUsage` followed by `Flags.NextFreeFlag`/
+`Flags.NextFreeVariable`; the flag was the first candidate in the classic
+non-temporary range, while the preceding variables were occupied by script,
+event, thumb-variable, or named-constant usage. The hardened range-aware
+implementation still reports flag 33 in `persistent-story`; its current
+runtime variable result is the first free persistent candidate, 16436
+(`0x4034`), because the explicit range result is now reported directly.
+
+The free-flag test scans parser-recognized script flag usage, hidden-item
+flags, trainer flags, reserved named flags, and every map object-event flag.
+It cannot detect arbitrary flag use in compiled game code outside the script
+and event metadata understood by HMA. The variable test covers HMA's script,
+event, thumb-variable, and reserved-variable usage.
+
+The final validation commands were:
+
+```powershell
+dotnet build HexManiacAdvance.sln -c Debug
+dotnet test HexManiacAdvance.sln -c Debug --no-build `
+  --filter FullyQualifiedName~HexManiac.Agent.Tests `
+  --logger "console;verbosity=minimal"
+```
+
+The solution build passed with nullable-analysis warnings and zero errors.
+Agent tests passed: 10 passed, 0 skipped, 0 failed. CUBE runtime comparison
+remains **NOT RUN** because no CUBE ROM was supplied. The adjacent-ROM TOML
+positive path is implemented but remains **NOT RUN** because neither supplied
+vanilla ROM has an adjacent `.toml`.

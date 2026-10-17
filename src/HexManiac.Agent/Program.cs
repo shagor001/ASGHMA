@@ -57,11 +57,21 @@ namespace HavenSoft.HexManiac.Agent {
                using var document = JsonDocument.Parse(json);
                var root = document.RootElement;
                var map = root.TryGetProperty("map", out var mapValue) ? mapValue.GetString() : null;
+               var range = root.TryGetProperty("range", out var rangeValue) ? rangeValue.GetString() : "persistent";
                switch (tool.ToLowerInvariant()) {
                   case "get_map": return WriteResponse(await AgentApi.GetMap(romPath, map));
                   case "list_events": return WriteResponse(await AgentApi.ListEvents(romPath, map, root.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : "all"));
-                  case "find_free_flag": return WriteResponse(await AgentApi.FindFreeFlag(romPath));
-                  case "find_free_var": return WriteResponse(await AgentApi.FindFreeVar(romPath));
+                  case "find_free_flag": return WriteResponse(await AgentApi.FindFreeFlag(romPath, range));
+                  case "find_free_var": return WriteResponse(await AgentApi.FindFreeVar(romPath, range));
+                  case "decompile_script":
+                     if (!root.TryGetProperty("address", out var addressValue) || !addressValue.TryGetInt32(out var address)) throw new ArgumentException("address is required.");
+                     return WriteResponse(await AgentApi.DecompileScript(romPath, address));
+                  case "list_constants":
+                     if (!root.TryGetProperty("kind", out var kindValue)) throw new ArgumentException("kind is required.");
+                     return WriteResponse(await AgentApi.ListConstants(romPath, kindValue.GetString()));
+                  case "search_script_commands":
+                     if (!root.TryGetProperty("query", out var queryValue)) throw new ArgumentException("query is required.");
+                     return WriteResponse(await AgentApi.SearchScriptCommands(romPath, queryValue.GetString()));
                   default:
                      Console.WriteLine(JsonSerializer.Serialize(AgentApi.ToolResponse<object>.Failure("unknown_tool", $"Unknown tool: {tool}"), JsonOptions));
                      return 1;
