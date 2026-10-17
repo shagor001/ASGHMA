@@ -1,5 +1,6 @@
 using HavenSoft.HexManiac.Agent;
 using HavenSoft.HexManiac.Core.Models;
+using HavenSoft.HexManiac.Core.Models.Code;
 using HavenSoft.HexManiac.Core.Models.Runs;
 using HavenSoft.HexManiac.Core.ViewModels;
 using HavenSoft.HexManiac.Core.ViewModels.DataFormats;
@@ -94,6 +95,96 @@ namespace HavenSoft.HexManiac.Agent.Tests {
          Assert.InRange(response.Result.Value, response.Result.RangeStart, response.Result.RangeEnd);
       }
 
+      [SkippableTheory]
+      [InlineData("Pokemon FireRed.gba")]
+      [InlineData("Pokemon Emerald.gba")]
+      public async Task FindFreeVar_IsNotReferencedByScriptsTriggersOrKnownVarFields(string fileName) {
+         var romPath = Rom(fileName);
+         Skip.IfNot(File.Exists(romPath));
+         var before = await File.ReadAllBytesAsync(romPath);
+         var response = await AgentApi.FindFreeVar(romPath);
+         Assert.True(response.Ok);
+         var singletons = new Singletons();
+         var model = new HardcodeTablesModel(singletons, await File.ReadAllBytesAsync(romPath), new StoredMetadata(Array.Empty<string>()));
+         var viewPort = new ViewPort(romPath, model, InstantDispatch.Instance, singletons, new MapTutorialsViewModel(), new StubFileSystem());
+         await viewPort.InitializationWorkload;
+         var parser = viewPort.Tools.CodeTool.ScriptParser;
+         Assert.DoesNotContain(response.Result.Value, Flags.GetScriptUsage(model, parser).Variables);
+         Assert.Empty(Flags.FindVarUsages(model, parser, response.Result.Value));
+         foreach (var element in Flags.GetAllEvents(model, "scripts")) {
+            if (element.HasField("trigger")) Assert.NotEqual(response.Result.Value, element.GetValue("trigger"));
+         }
+         Assert.Equal(before, await File.ReadAllBytesAsync(romPath));
+      }
+
+      [SkippableTheory]
+      [InlineData("Pokemon FireRed.gba")]
+      [InlineData("Pokemon Emerald.gba")]
+      public async Task CompileScript_InvalidInputIsDryRun(string fileName) {
+         var romPath = Rom(fileName);
+         Skip.IfNot(File.Exists(romPath));
+         var before = await File.ReadAllBytesAsync(romPath);
+         var historySingletons = new Singletons();
+         var historyModel = new HardcodeTablesModel(historySingletons, before.ToArray(), new StoredMetadata(Array.Empty<string>()));
+         var historyViewPort = new ViewPort(romPath, historyModel, InstantDispatch.Instance, historySingletons, new MapTutorialsViewModel(), new StubFileSystem());
+         await historyViewPort.InitializationWorkload;
+         var misspelled = await AgentApi.CompileScript(romPath, "not_a_real_command");
+         Assert.False(misspelled.Ok);
+         Assert.NotNull(misspelled.Error.Line);
+         Assert.Contains("not_a_real_command", misspelled.Error.Message);
+         Assert.True(historyViewPort.ChangeHistory.IsSaved);
+         var wrongArguments = await AgentApi.CompileScript(romPath, "end 1");
+         Assert.False(wrongArguments.Ok);
+         Assert.True(historyViewPort.ChangeHistory.IsSaved);
+         var unknownConstant = await AgentApi.CompileScript(romPath, "setflag DOES_NOT_EXIST");
+         Assert.False(unknownConstant.Ok);
+         Assert.True(historyViewPort.ChangeHistory.IsSaved);
+         Assert.Equal(before, await File.ReadAllBytesAsync(romPath));
+      }
+
+      [SkippableTheory]
+      [InlineData("Pokemon FireRed.gba")]
+      [InlineData("Pokemon Emerald.gba")]
+      public async Task CompileScript_RoundTripsFirst200ReachableScripts(string fileName) {
+         var romPath = Rom(fileName);
+         Skip.IfNot(File.Exists(romPath));
+         var singletons = new Singletons();
+         var original = await File.ReadAllBytesAsync(romPath);
+         var model = new HardcodeTablesModel(singletons, original.ToArray(), new StoredMetadata(Array.Empty<string>()));
+         var viewPort = new ViewPort(romPath, model, InstantDispatch.Instance, singletons, new MapTutorialsViewModel(), new StubFileSystem());
+         await viewPort.InitializationWorkload;
+         var parser = viewPort.Tools.CodeTool.ScriptParser;
+         var addresses = Flags.GetAllTopLevelScripts(model).Where(address => address >= 0 && address < model.Count).OrderBy(address => address).Take(200).ToList();
+         var exact = 0;
+         var mismatches = new List<string>();
+         foreach (var address in addresses) {
+            var length = parser.GetScriptSegmentLength(model, address);
+            if (length <= 0 || address + length > original.Length) continue;
+            var sections = 0;
+            var text = parser.Parse(model, address, length, ref sections);
+            var errors = new List<string>();
+            void Handler(object sender, ScriptErrorInfo info) => errors.Add(info.Message);
+            parser.CompileError += Handler;
+            var token = new ModelDelta();
+            byte[] compiledBytes;
+            try {
+               compiledBytes = parser.Compile(token, model, address, ref text, out var _, out var _);
+            } finally {
+               parser.CompileError -= Handler;
+               token.Revert(model);
+            }
+            if (compiledBytes == null || errors.Count > 0) {
+               mismatches.Add($"{address}: compile error {string.Join(" ", errors)}");
+               continue;
+            }
+            var expected = original.Skip(address).Take(length).ToArray();
+            if (expected.SequenceEqual(compiledBytes)) exact++;
+            else if (mismatches.Count < 5) mismatches.Add($"{address}: original {length} bytes, compiled {compiledBytes.Length} bytes");
+         }
+         Console.WriteLine($"{fileName}: round-trip exact {exact}/{addresses.Count}; mismatches: {string.Join(" | ", mismatches)}");
+         Assert.NotEmpty(addresses);
+      }
+
       [SkippableFact]
       public async Task DecompileScript_MatchesKnownFireRedAndEmeraldScripts() {
          Skip.IfNot(File.Exists(Rom("Pokemon FireRed.gba")));
@@ -123,6 +214,15 @@ namespace HavenSoft.HexManiac.Agent.Tests {
          Assert.True(response.Ok);
          Assert.Contains(response.Result.Values, item => item.Value == 0 && item.Name == "face_down");
          Assert.All(response.Result.Values, item => Assert.NotNull(item.NameSource));
+      }
+
+      [SkippableFact]
+      public async Task ListConstants_ReturnsEmeraldSpriteValues() {
+         Skip.IfNot(File.Exists(Rom("Pokemon Emerald.gba")));
+         var response = await AgentApi.ListConstants(Rom("Pokemon Emerald.gba"), "sprites");
+         Assert.True(response.Ok);
+         Assert.NotEmpty(response.Result.Values);
+         Assert.Equal(0, response.Result.Values[0].Value);
       }
 
       [SkippableFact]

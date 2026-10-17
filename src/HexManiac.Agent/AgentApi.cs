@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 
 namespace HavenSoft.HexManiac.Agent {
@@ -96,6 +97,10 @@ namespace HavenSoft.HexManiac.Agent {
                _ => throw new ArgumentException($"Unknown constant kind: {kind}.")
             };
             var options = viewPort.Model.GetOptions(listName) ?? Array.Empty<string>();
+            if (options.Count == 0 && normalized is "sprites" or "object_graphics" or "object-graphics") {
+               var table = viewPort.Model.GetTableModel(listName);
+               options = table == null ? Array.Empty<string>() : Enumerable.Range(0, table.Count).Select(value => value.ToString()).ToList();
+            }
             var values = options.Select((name, value) => new ConstantEntry(
                value,
                string.IsNullOrWhiteSpace(name) || name == value.ToString() ? null : name,
@@ -142,6 +147,38 @@ namespace HavenSoft.HexManiac.Agent {
             }
             return (IReadOnlyList<CommandResult>)results.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToList();
          });
+      }
+
+      public static async Task<ToolResponse<CompileResult>> CompileScript(string romPath, string script, int address = 0) {
+         try {
+            if (!File.Exists(romPath)) return ToolResponse<CompileResult>.Failure("rom_not_found", $"ROM not found: {romPath}");
+            var bytes = await File.ReadAllBytesAsync(romPath);
+            var singletons = new Singletons();
+            var metadataPath = Path.ChangeExtension(romPath, ".toml");
+            var metadata = File.Exists(metadataPath) ? new StoredMetadata(File.ReadAllLines(metadataPath)) : new StoredMetadata(Array.Empty<string>());
+            var model = new HardcodeTablesModel(singletons, bytes, metadata);
+            var viewPort = new ViewPort(romPath, model, InstantDispatch.Instance, singletons, new MapTutorialsViewModel(), new StubFileSystem());
+            await viewPort.InitializationWorkload;
+            var parser = viewPort.Tools.CodeTool.ScriptParser;
+            var errors = new List<CompileIssue>();
+            void Handler(object sender, ScriptErrorInfo info) => errors.Add(new CompileIssue(info.Segment.Line + 1, info.Message));
+            parser.CompileError += Handler;
+            var token = new ModelDelta();
+            var text = script ?? string.Empty;
+            byte[] result;
+            try {
+               result = parser.Compile(token, model, address, ref text, out var _, out var _);
+            } finally {
+               parser.CompileError -= Handler;
+            }
+            var compile = new CompileResult(result?.Length ?? 0, errors, Array.Empty<CompileIssue>(), result ?? Array.Empty<byte>());
+            if (result == null || errors.Count > 0) return new ToolResponse<CompileResult>(SchemaVersion, false, compile, new ToolError("compile_error", errors.Count == 0 ? "The script could not be compiled." : errors[0].Message, errors.Count == 0 ? null : errors[0].Line));
+            return ToolResponse<CompileResult>.Success(compile);
+         } catch (ArgumentException ex) {
+            return ToolResponse<CompileResult>.Failure("invalid_argument", ex.Message);
+         } catch (Exception ex) {
+            return ToolResponse<CompileResult>.Failure("tool_error", ex.Message);
+         }
       }
 
       private static FreeValueResult FindFlagInRange(IDataModel model, ISet<int> used, string range) {
@@ -252,11 +289,13 @@ namespace HavenSoft.HexManiac.Agent {
          public static ToolResponse<T> Success(T result) => new(AgentApi.SchemaVersion, true, result, null);
          public static ToolResponse<T> Failure(string code, string message) => new(AgentApi.SchemaVersion, false, default, new ToolError(code, message));
       }
-      public sealed record ToolError(string Code, string Message);
+      public sealed record ToolError(string Code, string Message, int? Line = null);
       public sealed record MapResult(int MapId, int Width, int Height, int LayoutId, EventCounts EventCounts);
       public sealed record EventCounts(int Objects, int Warps, int Scripts, int Signposts);
       public sealed record FreeValueResult(int Value, string Range = null, int RangeStart = -1, int RangeEnd = -1);
       public sealed record ScriptResult(int Address, string Text);
+      public sealed record CompileIssue(int Line, string Message);
+      public sealed record CompileResult(int ByteSize, IReadOnlyList<CompileIssue> Errors, IReadOnlyList<CompileIssue> Warnings, [property: JsonIgnore] byte[] Bytes);
       public sealed record ConstantResult(string Kind, string ListName, IReadOnlyList<ConstantEntry> Values);
       public sealed record ConstantEntry(int Value, string Name, string NameSource);
       public sealed record CommandResult(string Name, IReadOnlyList<CommandArgument> Arguments);

@@ -201,7 +201,46 @@ dotnet test HexManiacAdvance.sln -c Debug --no-build `
 ```
 
 The solution build passed with nullable-analysis warnings and zero errors.
-Agent tests passed: 10 passed, 0 skipped, 0 failed. CUBE runtime comparison
+Agent tests passed: 17 passed, 0 skipped, 0 failed. CUBE runtime comparison
 remains **NOT RUN** because no CUBE ROM was supplied. The adjacent-ROM TOML
 positive path is implemented but remains **NOT RUN** because neither supplied
 vanilla ROM has an adjacent `.toml`.
+
+## Phase 2, slice 1: compile dry run
+
+`compile_script` accepts `text` and an optional `address` and compiles against
+a new model loaded from a copy of the ROM bytes. It never passes the real ROM
+model to `ScriptParser.Compile`. Errors contain a line number and message,
+while warnings are returned separately. The real ROM bytes and
+`ViewPort.ChangeHistory` remain unchanged after every call.
+
+Verified dry-run results:
+
+- `end` returned `Ok: true`, `ByteSize: 1`, and empty errors/warnings.
+- `not_a_real_command` returned `Ok: false`, line 1, with
+  `not_a_real_command is not a valid command`.
+- `end 1` returned `Ok: false`, line 1, with an argument-count error.
+- `setflag DOES_NOT_EXIST` returned `Ok: false`, line 1, with a structured
+  number/constant parse error.
+
+The round-trip test decompiled and recompiled the first 200 reachable scripts
+for each supplied ROM. FireRed matched 200/200 exactly. Emerald matched
+197/200 exactly; the three mismatches were addresses 1954296 (347 original
+bytes and 347 compiled bytes), 1955292 (103 and 103), and 1988837 (25
+original bytes and 24 compiled bytes). These are byte-layout/decompilation
+normalization differences rather than writes to the ROM.
+
+The free-variable proof now runs on both ROMs. It checks
+`Flags.GetScriptUsage`, which covers parser-recognized variable commands,
+reserved variables, thumb variables, and script-event trigger variables, and
+also calls `Flags.FindVarUsages`. The returned FireRed value is 16436
+(`0x4034`); Emerald returns 16462 (`0x404E`). It cannot detect arbitrary
+variable use in compiled game code or fields that HMA does not expose as
+script/event metadata.
+
+The earlier FireRed value 16462 came from the previous allocation path and
+was not caused by a ROM write. The current range-aware implementation returns
+the first free value in the persistent range after HMA's usage scan; the
+proof test verifies that 16436 is not referenced. Thus 16436 is the correct
+current result for FireRed's deterministic lowest-free search; 16462 remains
+inside the range but is not the first candidate.

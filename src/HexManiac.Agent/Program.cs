@@ -72,6 +72,10 @@ namespace HavenSoft.HexManiac.Agent {
                   case "search_script_commands":
                      if (!root.TryGetProperty("query", out var queryValue)) throw new ArgumentException("query is required.");
                      return WriteResponse(await AgentApi.SearchScriptCommands(romPath, queryValue.GetString()));
+                  case "compile_script":
+                     if (!root.TryGetProperty("text", out var textValue)) throw new ArgumentException("text is required.");
+                     var compileAddress = root.TryGetProperty("address", out var compileAddressValue) && compileAddressValue.TryGetInt32(out var parsedAddress) ? parsedAddress : 0;
+                     return WriteResponse(await AgentApi.CompileScript(romPath, textValue.GetString(), compileAddress));
                   default:
                      Console.WriteLine(JsonSerializer.Serialize(AgentApi.ToolResponse<object>.Failure("unknown_tool", $"Unknown tool: {tool}"), JsonOptions));
                      return 1;
